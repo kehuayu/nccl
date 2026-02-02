@@ -1076,6 +1076,51 @@ fail:
   goto exit;
 }
 
+/*
+ * ncclIpcLocalRegisterBuffer - Register a user buffer for IPC access with peer ranks
+ *
+ * This function registers a user-provided buffer to enable IPC (Inter-Process Communication)
+ * access from peer ranks in the NCCL communicator.
+ *
+ * Flow when only CUDA Legacy IPC is supported:
+ * 1. Input Validation & Registration Record Lookup:
+ *    - Validates input parameters (comm, userbuff, buffSize, nPeers)
+ *    - Calls ncclRegFind() to locate or create a registration record for this buffer
+ *    - Verifies the registration record is valid via ncclRegLocalIsValid()
+ *
+ * 2. Delegation to ipcRegisterBuffer() (when legacy IPC only):
+ *    The actual registration is performed in ipcRegisterBuffer(), which handles both
+ *    modern cuMem* API and legacy CUDA IPC. When only legacy IPC is supported:
+ *
+ *    a) Buffer Address Range Determination:
+ *       - Uses cuMemGetAddressRange() to get base address and size of the allocation
+ *       - Checks CU_POINTER_ATTRIBUTE_IS_LEGACY_CUDA_IPC_CAPABLE to confirm legacy IPC capability
+ *
+ *    b) Legacy IPC Handle Creation:
+ *       - When ncclCuMemEnable() is true but cuMemRetainAllocationHandle() fails, OR
+ *       - When ncclCuMemEnable() is false but legacyIpcCap is true,
+ *       - Falls back to legacy path: cudaIpcGetMemHandle(&ipcInfo->ipcDesc.devIpc, baseAddr)
+ *       - Sets ipcInfo->legacyIpcCap = true and isLegacyIpc = true
+ *
+ *    c) Proxy Registration:
+ *       - Establishes proxy connection if needed via ncclProxyConnect()
+ *       - Sends IPC export info to proxy via ncclProxyCallBlocking() with ncclProxyMsgRegister
+ *       - Proxy opens the legacy IPC handle on the peer process and returns remote address
+ *
+ *    d) Registration Record Update:
+ *       - Stores the IPC info in regRecord->ipcInfos[peerLocalRank]
+ *       - Records remote address in regRecord->regIpcAddrs.hostPeerRmtAddrs[peerLocalRank]
+ *       - Copies remote addresses to device memory for kernel access
+ *       - Sets regBufFlag = 1 to indicate successful registration
+ *
+ * 3. Output:
+ *    - regBufFlag: Set to 1 if registration succeeds, 0 otherwise
+ *    - offsetOut: Offset of userbuff within the registered base allocation
+ *    - peerRmtAddrsOut: Pointer to remote addresses (device memory for collectives, host for P2P)
+ *
+ * Note: Legacy IPC requires ncclParamLegacyCudaRegister() to be enabled and
+ *       directMode to be disabled. If these conditions aren't met, registration fails.
+ */
 ncclResult_t ncclIpcLocalRegisterBuffer(ncclComm* comm, const void* userbuff, size_t buffSize, int* peerRanks, int nPeers, ncclIpcRegType type, int* regBufFlag, uintptr_t* offsetOut, uintptr_t** peerRmtAddrsOut) {
   ncclResult_t ret = ncclSuccess;
   struct ncclReg *regRecord = NULL;
@@ -1084,9 +1129,16 @@ ncclResult_t ncclIpcLocalRegisterBuffer(ncclComm* comm, const void* userbuff, si
   *offsetOut = 0;
   *peerRmtAddrsOut = NULL;
   if (comm && userbuff && buffSize > 0 && nPeers > 0) {
+    // Step 1: Find or create registration record for this buffer
     NCCLCHECKGOTO(ncclRegFind(comm, userbuff, buffSize, &regRecord), ret, fail);
+    // Step 2: Verify the registration record is valid for local IPC
     NCCLCHECKGOTO(ncclRegLocalIsValid(regRecord, &isValid), ret, fail);
     if (isValid) {
+      // Step 3: Perform IPC registration (handles both modern and legacy IPC paths)
+      // When only legacy IPC is supported, this will:
+      // - Use cudaIpcGetMemHandle() to export the buffer handle
+      // - Register with proxy to get remote mapped address
+      // - Store IPC info in regRecord with legacyIpcCap flag set
       NCCLCHECKGOTO(ipcRegisterBuffer(comm, userbuff, buffSize, peerRanks, nPeers, type, regRecord, regBufFlag, offsetOut, peerRmtAddrsOut, NULL), ret, fail);
     }
   }
