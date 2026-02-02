@@ -1088,19 +1088,20 @@ fail:
  *    - Calls ncclRegFind() to locate or create a registration record for this buffer
  *    - Verifies the registration record is valid via ncclRegLocalIsValid()
  *
- * 2. Delegation to ipcRegisterBuffer() (when legacy IPC only):
- *    The actual registration is performed in ipcRegisterBuffer(), which handles both
- *    modern cuMem* API and legacy CUDA IPC. When only legacy IPC is supported:
+ * 2. Delegation to ipcRegisterBuffer (when legacy IPC only):
+ *    The actual registration is performed in the static function ipcRegisterBuffer, which 
+ *    handles both modern cuMem* API and legacy CUDA IPC. When only legacy IPC is supported:
  *
  *    a) Buffer Address Range Determination:
  *       - Uses cuMemGetAddressRange() to get base address and size of the allocation
  *       - Checks CU_POINTER_ATTRIBUTE_IS_LEGACY_CUDA_IPC_CAPABLE to confirm legacy IPC capability
  *
- *    b) Legacy IPC Handle Creation:
- *       - When ncclCuMemEnable() is true but cuMemRetainAllocationHandle() fails, OR
- *       - When ncclCuMemEnable() is false but legacyIpcCap is true,
- *       - Falls back to legacy path: cudaIpcGetMemHandle(&ipcInfo->ipcDesc.devIpc, baseAddr)
- *       - Sets ipcInfo->legacyIpcCap = true and isLegacyIpc = true
+ *    b) Legacy IPC Handle Creation (when only legacy IPC is available):
+ *       - The legacy IPC path is triggered in two scenarios:
+ *         1. ncclCuMemEnable() is true but cuMemRetainAllocationHandle() fails (fallback)
+ *         2. ncclCuMemEnable() is false but legacyIpcCap is true (legacy-only mode)
+ *       - Uses legacy CUDA API: cudaIpcGetMemHandle(&ipcInfo->ipcDesc.devIpc, baseAddr)
+ *       - Sets ipcInfo->legacyIpcCap = true and isLegacyIpc = true to track legacy mode
  *
  *    c) Proxy Registration:
  *       - Establishes proxy connection if needed via ncclProxyConnect()
@@ -1119,7 +1120,8 @@ fail:
  *    - peerRmtAddrsOut: Pointer to remote addresses (device memory for collectives, host for P2P)
  *
  * Note: Legacy IPC requires ncclParamLegacyCudaRegister() to be enabled and
- *       directMode to be disabled. If these conditions aren't met, registration fails.
+ *       directMode to be disabled. If these conditions aren't met, registration fails:
+ *       the function sets regBufFlag = 0, clears output parameters, and returns via fail label.
  */
 ncclResult_t ncclIpcLocalRegisterBuffer(ncclComm* comm, const void* userbuff, size_t buffSize, int* peerRanks, int nPeers, ncclIpcRegType type, int* regBufFlag, uintptr_t* offsetOut, uintptr_t** peerRmtAddrsOut) {
   ncclResult_t ret = ncclSuccess;
